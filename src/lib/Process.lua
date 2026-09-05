@@ -484,19 +484,50 @@ function Process:PromptDiscordInvite(InviteCode: string)
     })
 end
 
+--// Fail-open: capturing/logging must never prevent a remote from firing.
+--// If anything in the capture path errors, the original call is still forwarded untouched.
+local LastForwardWarn = 0
+local function WarnForwarded(Feature: string, Remote: Instance, Error: any)
+    --// Throttle warnings so a hot remote cannot spam the console
+    local Now = tick()
+    if Now - LastForwardWarn < 5 then return end
+    LastForwardWarn = Now
+
+    local Name = "unknown"
+    pcall(function()
+        Name = Hook:Index(Remote, "Name")
+    end)
+
+    pcall(function()
+        Communication:ConsolePrint(`[{Feature}] capture failed ({Error}), forwarded remote '{Name}' untouched`)
+    end)
+end
+
 local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): table?
     --// Unpack Data
     local OriginalFunc = Data.OriginalFunc
     local Id = Data.Id
     local Method = Data.Method
 
+    --// Capture failed earlier: forward the original call untouched
+    if Id == nil then
+        if not OriginalFunc then return end
+        return {
+            OriginalFunc(Remote, ...)
+        }
+    end
+
     --// Check if the Remote is Blocked
     local RemoteData = Process:GetRemoteData(Id)
     if RemoteData.Blocked then return {} end
 
-    --// Check for a spoof
-    local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
-    if Spoof then return Spoof end
+    --// Check for a spoof (spoof errors must not break the original call)
+    local SpoofOk, Spoof = pcall(Process.GetRemoteSpoof, Process, Remote, Method, OriginalFunc, ...)
+    if not SpoofOk then
+        WarnForwarded("Spoof", Remote, Spoof)
+    elseif Spoof then
+        return Spoof
+    end
 
     --// Check if the orignal function was passed
     if not OriginalFunc then return end
@@ -512,48 +543,67 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 	local Method = Data.Method
     local TransferType = Data.TransferType
     local IsReceive = Data.IsReceive
+    local Args = {...}
 
 	--// Check if the transfertype method is allowed
-	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
+    --// Fail-open: if the check itself errors, the call is still forwarded
+    local CheckOk, Allowed = pcall(function()
+        if TransferType then
+            return self:RemoteAllowed(Remote, TransferType, Method)
+        end
+        return true
+    end)
+	if CheckOk and not Allowed then return end
 
-    --// Fetch details
-    local Id = Communication:GetDebugId(Remote)
-    local ClassData = self:GetClassData(Remote)
-    local Timestamp = tick()
+    --// Capture details for the log.
+    --// Fail-open: capture must never prevent the remote from firing.
+    local CaptureOk, CaptureError = pcall(function()
+        --// Fetch details
+        local Id = Communication:GetDebugId(Remote)
+        local ClassData = self:GetClassData(Remote)
+        local Timestamp = tick()
 
-    local CallingFunction
-    local SourceScript
+        local CallingFunction
+        local SourceScript
 
-    --// Add extra data into the log if needed
-    local ExtraData = self.ExtraData
-    if ExtraData then
-        self:Merge(Data, ExtraData)
+        --// Add extra data into the log if needed
+        local ExtraData = self.ExtraData
+        if ExtraData then
+            self:Merge(Data, ExtraData)
+        end
+
+        --// Get caller information
+        if not IsReceive then
+            CallingFunction = self:FindCallingLClosure(6)
+            SourceScript = CallingFunction and self:GetScriptFromFunc(CallingFunction) or nil
+        end
+
+        --// Add to queue
+        self:Merge(Data, {
+            Remote = cloneref(Remote),
+            CallingScript = getcallingscript(),
+            CallingFunction = CallingFunction,
+            SourceScript = SourceScript,
+            Id = Id,
+            ClassData = ClassData,
+            Timestamp = Timestamp,
+            Args = Args
+        })
+    end)
+
+    if not CaptureOk then
+        WarnForwarded("ProcessRemote", Remote, CaptureError)
     end
 
-    --// Get caller information
-    if not IsReceive then
-        CallingFunction = self:FindCallingLClosure(6)
-        SourceScript = CallingFunction and self:GetScriptFromFunc(CallingFunction) or nil
-    end
-
-    --// Add to queue
-    self:Merge(Data, {
-        Remote = cloneref(Remote),
-		CallingScript = getcallingscript(),
-        CallingFunction = CallingFunction,
-        SourceScript = SourceScript,
-        Id = Id,
-		ClassData = ClassData,
-        Timestamp = Timestamp,
-        Args = {...}
-    })
-
-    --// Invoke the Remote and log return values
+    --// Invoke the Remote (always forwarded, even when capture failed).
+    --// Errors from the original call itself still propagate untouched.
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
-    --// Queue log
-    Communication:QueueLog(Data)
+    --// Queue log only when the capture succeeded
+    if CaptureOk and Data.Id ~= nil then
+        pcall(Communication.QueueLog, Communication, Data)
+    end
 
     return ReturnValues
 end

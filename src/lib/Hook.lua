@@ -227,8 +227,11 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	--// Addionally, this is for __index calls.
 	--// 	A __namecall hook will not detect this
 	OriginalFunc = self:HookFunction(Func, function(self, ...)
-		--// Check if the Object is allowed 
-		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
+		--// Check if the Object is allowed (fail-open: forward on error)
+		local CheckOk, Allowed = pcall(function()
+			return Process:RemoteAllowed(self, "Send", FuncName)
+		end)
+		if CheckOk and not Allowed then return end
 
 		--// Process the remote data
 		return ProcessRemote(OriginalFunc, "__index", self, FuncName, ...)
