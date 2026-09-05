@@ -31,7 +31,7 @@ local Configuration = {
 	ParserUrl = "https://raw.githubusercontent.com/Jsssiee/Roblox-parser/c63f82da44c963b02bc38304928e31827859d812/dist/Main.luau"
 }
 
-print("[Sigma Spy] v12.0.1 - Config Fix Build - Loaded")
+print("[Sigma Spy] v12.0.1-FAILOPENFIX - Loaded")
 
 local function StartupLog(Message: string)
 	print(`[Sigma Spy] [startup] {Message}`)
